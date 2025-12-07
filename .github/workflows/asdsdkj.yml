@@ -1,0 +1,42 @@
+name: Windows RDP + Tailscale
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Install Tailscale
+      run: |
+        Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile tailscale.exe
+        Start-Process .\tailscale.exe -ArgumentList "/quiet" -Wait
+
+    - name: Connect Tailscale with static hostname
+      run: |
+        tailscale up `
+          --authkey $env:TAILSCALE_AUTH_KEY `
+          --hostname abc123 `
+          --accept-routes `
+          --reset
+      env:
+        TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+
+    - name: Enable RDP
+      run: |
+        Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+    - name: Create RDP user
+      run: |
+        net user RDPuser "Pass@123" /add
+        net localgroup administrators RDPuser /add
+
+    - name: Show Tailscale IP
+      run: tailscale ip
+
+    - name: Keep session alive
+      run: |
+        Write-Host "RDP Active..."
+        while ($true) { Start-Sleep -Seconds 3600 }
