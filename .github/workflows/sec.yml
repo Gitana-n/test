@@ -57,7 +57,7 @@ jobs:
       - name: Restore Tailscale State
         shell: pwsh
         run: |
-          $dest = "C:\ProgramData\Ttailscale"
+          $dest = "C:\ProgramData\Tailscale"
           mkdir $dest -Force
           $bytes = [Convert]::FromBase64String($env:TAILSCALE_STATE)
           [IO.File]::WriteAllBytes("$dest\server-state.conf", $bytes)
