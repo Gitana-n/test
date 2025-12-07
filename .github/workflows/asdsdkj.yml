@@ -3,70 +3,102 @@ name: RDP
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */5 * * *"
+    - cron: "0 */5 * * *"   # auto-run every 5 hours
 
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 3600
+    timeout-minutes: 360
 
     steps:
+
+      # -------------------------------
+      # RDP CONFIGURATION
+      # -------------------------------
       - name: Configure RDP
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-            -Name "fDenyTSConnections" -Value 0 -Force
+                           -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                           -Name "UserAuthentication" -Value 0 -Force
+          netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
+          Restart-Service TermService
 
-          netsh advfirewall firewall delete rule name="RDP-Allow" | Out-Null
-          netsh advfirewall firewall add rule name="RDP-Allow" dir=in action=allow protocol=TCP localport=3389
-
-          Restart-Service -Name TermService -Force
-
+      # -------------------------------
+      # CREATE RDP USER
+      # -------------------------------
       - name: Create RDP User
+        shell: pwsh
         run: |
+          # Generate secure password
           $Password = "RDP@" + -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 12 | % {[char]$_})
           $Secure = ConvertTo-SecureString $Password -AsPlainText -Force
 
+          # Create user
           New-LocalUser -Name "RDP" -Password $Secure -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "RDP"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
 
           echo "RDP_PASS=$Password" >> $env:GITHUB_ENV
 
+      # -------------------------------
+      # INSTALL TAILSCALE
+      # -------------------------------
       - name: Install Tailscale
+        shell: pwsh
         run: |
-          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
-          $installer = "$env:TEMP\tailscale.msi"
-          Invoke-WebRequest $url -OutFile $installer
-          Start-Process msiexec.exe -ArgumentList "/i `"$installer`" /quiet /norestart" -Wait
-          Remove-Item $installer
+          Invoke-WebRequest `
+            -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" `
+            -OutFile "tailscale.msi"
+          Start-Process msiexec.exe -ArgumentList "/i tailscale.msi /quiet /norestart" -Wait
 
-      - name: Start Tailscale (Stable IP Guaranteed)
+      # -------------------------------
+      # START TAILSCALE WITH AUTHKEY
+      # -------------------------------
+      - name: Start Tailscale
         shell: pwsh
         env:
-          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTHKEY }}
         run: |
+          Start-Service Tailscale
+
           & "C:\Program Files\Tailscale\tailscale.exe" up `
-            --authkey $env:TAILSCALE_AUTH_KEY `
-            --hostname gh-runner-fixed `
-            --accept-routes `
-            --advertise-tags=tag:gh `
-            --reset
+              --authkey $env:TAILSCALE_AUTH_KEY `
+              --hostname github-rdp `
+              --accept-routes `
+              --reset
 
-          # Fetch IP
-          $tsIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
-          echo "TS_IP=$tsIP" >> $env:GITHUB_ENV
+          # Get Tailscale IP
+          $ip = ""
+          for ($i=0; $i -lt 10; $i++) {
+              $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
+              if ($ip) { break }
+              Start-Sleep 5
+          }
 
+          if (-not $ip) { Write-Error "No Tailscale IP received."; exit 1 }
+
+          echo "TS_IP=$ip" >> $env:GITHUB_ENV
+
+      # -------------------------------
+      # DISPLAY CONNECTION INFO
+      # -------------------------------
       - name: Show Connection Info
         run: |
-          Write-Host "=== RDP READY ==="
+          Write-Host "==============================="
+          Write-Host "   RDP CONNECT"
+          Write-Host "==============================="
           Write-Host "Tailscale IP: $env:TS_IP"
           Write-Host "Username: RDP"
           Write-Host "Password: $env:RDP_PASS"
-          Write-Host "================="
-      
+          Write-Host "==============================="
+
+      # -------------------------------
+      # KEEP RUNNER ALIVE
+      # -------------------------------
       - name: Keep Alive
         run: |
           while ($true) {
-            Write-Host "[$(Get-Date)] ACTIVE"
+            Write-Host "RDP ACTIVE: $(Get-Date)"
             Start-Sleep -Seconds 300
           }
