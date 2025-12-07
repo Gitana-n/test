@@ -1,42 +1,72 @@
-name: Windows RDP + Tailscale
+name: RDP
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "0 */5 * * *"
 
 jobs:
-  build:
+  secure-rdp:
     runs-on: windows-latest
+    timeout-minutes: 3600
 
     steps:
-    - name: Install Tailscale
-      run: |
-        Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile tailscale.exe
-        Start-Process .\tailscale.exe -ArgumentList "/quiet" -Wait
+      - name: Configure RDP
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -Name "fDenyTSConnections" -Value 0 -Force
 
-    - name: Connect Tailscale with static hostname
-      run: |
-        tailscale up `
-          --authkey $env:TAILSCALE_AUTH_KEY `
-          --hostname abc123 `
-          --accept-routes `
-          --reset
-      env:
-        TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+          netsh advfirewall firewall delete rule name="RDP-Allow" | Out-Null
+          netsh advfirewall firewall add rule name="RDP-Allow" dir=in action=allow protocol=TCP localport=3389
 
-    - name: Enable RDP
-      run: |
-        Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
-        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Restart-Service -Name TermService -Force
 
-    - name: Create RDP user
-      run: |
-        net user RDPuser "Pass@123" /add
-        net localgroup administrators RDPuser /add
+      - name: Create RDP User
+        run: |
+          $Password = "RDP@" + -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 12 | % {[char]$_})
+          $Secure = ConvertTo-SecureString $Password -AsPlainText -Force
 
-    - name: Show Tailscale IP
-      run: tailscale ip
+          New-LocalUser -Name "RDP" -Password $Secure -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
 
-    - name: Keep session alive
-      run: |
-        Write-Host "RDP Active..."
-        while ($true) { Start-Sleep -Seconds 3600 }
+          echo "RDP_PASS=$Password" >> $env:GITHUB_ENV
+
+      - name: Install Tailscale
+        run: |
+          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+          $installer = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest $url -OutFile $installer
+          Start-Process msiexec.exe -ArgumentList "/i `"$installer`" /quiet /norestart" -Wait
+          Remove-Item $installer
+
+      - name: Start Tailscale (Stable IP Guaranteed)
+        shell: pwsh
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          & "C:\Program Files\Tailscale\tailscale.exe" up `
+            --authkey $env:TAILSCALE_AUTH_KEY `
+            --hostname gh-runner-fixed `
+            --accept-routes `
+            --advertise-tags=tag:gh `
+            --reset
+
+          # Fetch IP
+          $tsIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
+          echo "TS_IP=$tsIP" >> $env:GITHUB_ENV
+
+      - name: Show Connection Info
+        run: |
+          Write-Host "=== RDP READY ==="
+          Write-Host "Tailscale IP: $env:TS_IP"
+          Write-Host "Username: RDP"
+          Write-Host "Password: $env:RDP_PASS"
+          Write-Host "================="
+      
+      - name: Keep Alive
+        run: |
+          while ($true) {
+            Write-Host "[$(Get-Date)] ACTIVE"
+            Start-Sleep -Seconds 300
+          }
